@@ -1,0 +1,1 @@
+ALLOWED_EXTENSIONS = ['.docx', '.pptx', '.pdf']
