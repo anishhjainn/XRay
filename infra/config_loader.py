@@ -5,9 +5,6 @@ Tiny configuration loader.
 Design:
 - Single Responsibility: provide app-wide config values.
 - Keeps sane defaults; allows simple environment overrides for quick tweaks.
-
-Extend later:
-- Load from TOML/YAML if you want per-project settings.
 """
 
 from __future__ import annotations
