@@ -38,11 +38,13 @@ from infra.logging_config import configure_logging
 import processors.docx_processor  # noqa: F401
 import processors.pptx_processor  # noqa: F401
 import processors.pdf_processor   # noqa: F401
+import processors.xlsx_processor  # noqa: F401
 
 import checks.base_checks         # noqa: F401
 import checks.docx_checks         # noqa: F401
 import checks.pptx_checks         # noqa: F401
 import checks.pdf_checks          # noqa: F401
+import checks.xlsx_checks         # noqa: F401
 
 from checks.settings import set_modified_cutoff, clear_modified_cutoff
 from services.orchestrator import Orchestrator

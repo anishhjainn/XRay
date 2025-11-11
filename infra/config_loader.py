@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 _DEFAULT: Dict[str, Any] = {
     "max_filename_length": 120,
-    "target_extensions": [".docx", ".pptx", ".pdf"],
+    "target_extensions": [".docx", ".pptx", ".pdf",".xlsx"],
     "ignore_dirs": [".git", "__pycache__", "venv"],
     "log_level": "INFO",  # DEBUG/INFO/WARNING/ERROR
 }
