@@ -32,6 +32,8 @@ import streamlit as st
 
 from infra.config_loader import load_config
 from infra.logging_config import configure_logging
+from ui.components import folder_picker, cutoff_input, run_controls, summary_panel, results_table, downloads, progress_widgets, yellow_cells_drilldown
+
 
 # Import processors/checks so they self-register with the registry on import.
 # (Dependency Inversion: the app never references their internals.)
@@ -98,6 +100,8 @@ def main():
         st.divider()
         summary_panel(report)
         filtered_df = results_table(report)
+        from ui.components import yellow_cells_drilldown  # add at top with other UI imports, or inline here
+        yellow_cells_drilldown(filtered_df)
         downloads(filtered_df)
 
         log.info("Scan completed on %s. Results: %d rows.", root_path, len(report.files))

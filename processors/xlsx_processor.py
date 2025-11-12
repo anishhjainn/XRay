@@ -52,6 +52,8 @@ from xml.etree.ElementTree import iterparse
 # Third-party: used minimally, in read-only mode for core props & sheet states
 from openpyxl import load_workbook
 
+from services.xlsx_theme import resolve_theme_color, theme_rgb_map_from_path
+
 from core.interfaces import FileProcessor
 from core.models import FileArtifact
 from core.registry import register_processor
@@ -69,6 +71,54 @@ _ERROR_TOKENS = {
     "#GETTING_DATA",
 }
 
+#helpers for Openpyxl
+
+def _norm_rgb(rgb: str | None) -> str: #this function normalizes the rgb value to last 6 hex chars
+    s = (rgb or "").upper()
+    return s[-6:] if len(s) >= 6 else s
+
+"""
+This next function (_color_obj_is_classic_yellow) checks if the color object is classic yellow. 
+First it checks the rgb value of the color object.
+If the rgb value is not classic yellow, it checks the indexed value of the color object.
+If the indexed value is not classic yellow, it checks the theme value of the color object.
+if the theme value is not classic yellow, it returns false.
+"""
+
+def _color_obj_is_classic_yellow(color, theme_rgb_map: dict[int, str]) -> bool: 
+    if color is None: #if color is None then return false
+        return False
+
+    rgb_value = getattr(color, "rgb", None)
+    if isinstance(rgb_value, str) and _norm_rgb(rgb_value) == "FFFF00":
+        return True
+
+    idx = getattr(color, "indexed", None)
+    if idx is not None and str(idx) == "6":
+        return True
+
+    theme_idx = getattr(color, "theme", None)
+    if theme_idx is not None:
+        resolved = resolve_theme_color(theme_rgb_map, theme_idx, getattr(color, "tint", None))
+        if resolved and _norm_rgb(resolved) == "FFFF00":
+            return True
+
+    return False
+
+
+def _is_classic_yellow_fill(fill, theme_rgb_map: dict[int, str]) -> bool:
+    try:
+        if getattr(fill, "patternType", None) != "solid":
+            return False
+        fg = getattr(fill, "fgColor", None)
+        bg = getattr(fill, "bgColor", None)
+        if _color_obj_is_classic_yellow(fg, theme_rgb_map):
+            return True
+        if _color_obj_is_classic_yellow(bg, theme_rgb_map):
+            return True
+        return False
+    except Exception:
+        return False
 
 class XlsxProcessor(FileProcessor):
     def supports(self):
@@ -99,7 +149,11 @@ class XlsxProcessor(FileProcessor):
             "password_encrypted_workbook": False,
             "has_vba_project": False,
             "read_error": False,
+            "yellow_cell_count": 0,
+            "yellow_tab_sheets": [],
+            "yellow_tab_sheet_count": 0,
         }
+        theme_rgb_map = theme_rgb_map_from_path(path)
 
         # --- 1) Quick header sniff: distinguish OOXML ZIP vs. OLE/encrypted container ---
         # Excel files that are password-encrypted are typically stored in an OLE Compound File
@@ -124,10 +178,11 @@ class XlsxProcessor(FileProcessor):
             metadata["read_error"] = True
             metadata["read_error_detail"] = f"Header read failed: {exc.__class__.__name__}"
 
-        # --- 2) Use openpyxl (read-only) for core props & sheet visibility (cheap, robust) ---
+        # --- 2) Use openpyxl for core props & sheet visibility (cheap, robust) ---
         # We avoid iterating cells via openpyxl (slow for huge sheets); XML streaming later handles heavy scanning.
         try:
-            wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+            # Need styles for yellow detection; optimized read_only cells omit fill info.
+            wb = load_workbook(filename=str(path), data_only=True)
 
             # Core document properties (author/created/modified)
             props = getattr(wb, "properties", None)
@@ -156,6 +211,38 @@ class XlsxProcessor(FileProcessor):
                     continue
             metadata["hidden_sheet_count"] = hidden
             metadata["very_hidden_sheet_count"] = very_hidden
+
+                        # ---- Yellow sheet tabs (classic yellow) ----
+            yellow_tabs = []
+            for name in sheetnames:
+                try:
+                    ws = wb[name]
+                    tab = getattr(getattr(ws, "sheet_properties", None), "tabColor", None)
+                    if tab is not None and _color_obj_is_classic_yellow(tab, theme_rgb_map):
+                        yellow_tabs.append(name)
+                except Exception:
+                    continue
+            metadata["yellow_tab_sheets"] = yellow_tabs
+            metadata["yellow_tab_sheet_count"] = len(yellow_tabs)
+
+            # ---- Yellow cells (classic yellow) ----
+            yellow_cells = 0
+            try:
+                for ws in wb.worksheets:
+                    for row in ws.iter_rows():
+                        for cell in row:
+                            fill = getattr(cell, "fill", None)
+                            if fill and _is_classic_yellow_fill(fill, theme_rgb_map):
+                                yellow_cells += 1
+            except Exception as exc:
+                # Continue with a partial count but record the issue
+                metadata["read_error"] = True
+                prev = metadata.get("read_error_detail")
+                msg = f"yellow-cells-scan: {exc.__class__.__name__}"
+                metadata["read_error_detail"] = msg if not prev else f"{prev}; {msg}"
+
+            metadata["yellow_cell_count"] = yellow_cells
+
 
         except Exception as exc:
             # Not fatal: XML streaming (below) can still give us most counts

@@ -361,3 +361,87 @@ register_check(XlsxDataConnectionsCheck())
 register_check(XlsxWorkbookProtectionCheck())
 register_check(XlsxCommentsCheck())
 register_check(XlsxVbaInXlsxCheck())
+
+#Implementing Yellow cells check
+
+# -------------------------------------------------------------------
+# 8) Yellow-highlighted Cells (fail if any yellow cell found)
+# 9) Yellow-highlighted Sheet Tabs (fail if any sheet tab is yellow)
+# -------------------------------------------------------------------
+
+class XlsxYellowCellsCheck(Check):
+    """
+    Fail if any cells are highlighted with standard yellow fill.
+    Uses metadata['yellow_cell_count'] populated by the XLSX processor.
+    """
+
+    def name(self) -> str:
+        return "xlsx_yellow_cells"
+
+    def description(self) -> str:
+        return "Workbook must not contain yellow-highlighted cells."
+
+    def applies_to(self) -> list[str]:
+        return [".xlsx"]
+
+    def run(self, artifact: FileArtifact) -> CheckResult:
+        meta = artifact.metadata or {}
+
+        if meta.get("read_error"):
+            return _unreadable_result(self.name(), self.description(), meta)
+
+        yellow_cells = int(meta.get("yellow_cell_count") or 0)
+        passed = yellow_cells == 0
+
+        return CheckResult(
+            file = artifact.path,
+            check_name=self.name(),
+            passed=passed,
+            severity=Severity.INFO if passed else Severity.ERROR,
+            message=(
+                "OK: no yellow cells" if passed else "Yellow cells are present in the workbook"
+            ),
+            extra={"yellow_cell_count": yellow_cells},
+        )
+
+
+class XlsxYellowSheetTabsCheck(Check):
+    """
+    Fail if any sheet tab is highlighted with standard yellow color.
+    Uses metadata['yellow_tab_sheets'] and ['yellow_tab_sheet_count'].
+    """
+
+    def name(self) -> str:
+        return "xlsx_yellow_sheet_tabs"
+
+    def description(self) -> str:
+        return "Workbook must not contain sheets with yellow tab color."
+
+    def applies_to(self) -> list[str]:
+        return [".xlsx"]
+
+    def run(self, artifact: FileArtifact) -> CheckResult:
+        meta = artifact.metadata or {}
+
+        if meta.get("read_error"):
+            return _unreadable_result(self.name(), self.description(), meta)
+
+        count = int(meta.get("yellow_tab_sheet_count") or 0)
+        sheets = meta.get("yellow_tab_sheets") or []
+        passed = count == 0
+
+        return CheckResult(
+            file = artifact.path,
+            check_name=self.name(),
+            passed=passed,
+            severity=Severity.INFO if passed else Severity.ERROR,
+            message=(
+                "OK: no yellow tabs" if passed else "Yellow tabs are present in the workbook"
+            ),
+            extra={"yellow_tab_sheet_count": count, "yellow_tab_sheets": sheets},
+        )
+
+
+# Register the new checks so they’re picked up by the orchestrator
+register_check(XlsxYellowCellsCheck())
+register_check(XlsxYellowSheetTabsCheck())

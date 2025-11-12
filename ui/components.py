@@ -20,7 +20,7 @@ from typing import Optional, Tuple, Callable, Iterable
 
 import pandas as pd
 import streamlit as st
-
+from services.xlsx_locators_openpyxl import list_yellow_cells
 from core.models import AggregateReport, Severity, CheckResult
 
 # --- report shape detection helpers ---
@@ -43,6 +43,7 @@ def _flatten_v2_checks(report):
                 "Extra": r.extra,
             })
     return rows
+
 
 # -------- Inputs --------
 
@@ -262,3 +263,60 @@ def files_summary_table(report):
 
         st.dataframe(fdf, use_container_width=True)
         return fdf
+
+@st.cache_data(show_spinner=False)
+def _cached_list_yellow_cells(path_str: str) -> list[Tuple[str, str]]:
+    """Cached wrapper so repeated clicks on the same file are instant."""
+    return list_yellow_cells(Path(path_str))
+
+
+def yellow_cells_drilldown(filtered_df: pd.DataFrame) -> None:
+    """
+    Render a 'Drill-down: Yellow cells' panel listing files that failed the xlsx_yellow_cells check.
+    The user can click a button to list exact (Sheet, Cell) locations.
+    """
+    if filtered_df is None or filtered_df.empty:
+        return
+
+    # Expect the results DataFrame to have at least: 'file_path', 'check_name', 'passed'
+    if not {"file_path", "check_name", "passed"}.issubset(set(filtered_df.columns)):
+        # If the table schema changes, we fail gracefully (no panel).
+        return
+
+    failed = filtered_df[
+        (filtered_df["check_name"] == "xlsx_yellow_cells") & (filtered_df["passed"] == False)
+    ]
+    if failed.empty:
+        return
+
+    with st.expander("🔎 Drill-down: Yellow cells", expanded=False):
+        st.caption("List exact cells for each file that failed the 'Yellow cells' check.")
+        unique_files = sorted(set(failed["file_path"].astype(str)))
+
+        for file_path in unique_files:
+            colA, colB = st.columns([3, 1])
+            colA.write(file_path)
+            btn_key = f"btn_yellow_cells_{file_path}"
+            if colB.button("List yellow cells", key=btn_key, use_container_width=True):
+                with st.spinner("Scanning workbook for yellow-highlighted cells..."):
+                    try:
+                        rows = _cached_list_yellow_cells(file_path)
+                    except Exception as exc:
+                        st.warning(f"Could not parse this workbook: {exc}")
+                        rows = []
+
+                if rows:
+                    df = pd.DataFrame(rows, columns=["Sheet", "Cell"])
+                    st.dataframe(df, use_container_width=True, height=240)
+
+                    # Download CSV
+                    csv = df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name="yellow_cells.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("No yellow-highlighted cells found.")

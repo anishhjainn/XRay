@@ -90,7 +90,7 @@ class FileVerdict(Enum):
 
 
 @dataclass(frozen=True)
-class FileReport:
+class FileReport: 
     """
     All results related to a single file, plus a verdict and quick counts.
     """
