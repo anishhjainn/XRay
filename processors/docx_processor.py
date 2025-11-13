@@ -2,24 +2,39 @@
 """
 DOCX technician (FileProcessor): builds a read-only FileArtifact for .docx files.
 
-New metadata:
+Existing metadata produced (consumed by current checks):
 - comments_present: bool
 - comments_count: int
 - tracked_changes_count: int
 - highlight_run_count: int          (w:highlight)
 - shading_highlight_count: int      (w:shd with non-empty/non-auto fill)
-- core_modified: ISO 8601 (already present earlier)
+- core_modified: ISO 8601 string (from core properties)
+- read_error / read_error_detail on core parse failures
+
+New in Phase 3 (for spelling now, grammar later):
+- text_sample: normalized plain text sample of document body + tables (read-only)
+- text_length: length of text_sample
+- token_count: basic English word token count (lowercased)
+- text_extraction_error / text_extraction_error_detail: flags if text extraction fails
+
+Design (SOLID):
+- SRP: Processor gathers metadata only; it does not make policy decisions (checks do).
+- OCP: Adding new checks only reads metadata; orchestrator is unchanged.
+- LSP: Still honors FileProcessor; orchestrator treats it interchangeably.
+- ISP: Checks depend only on FileArtifact (no parsing libraries).
+- DIP: Checks depend on abstract text (string in metadata), not concrete libraries like python-docx.
 
 Implementation notes:
-- Use python-docx for core properties (simple & stable).
-- Use zipfile + iterparse to stream-read XML parts (fast, low memory).
+- Use python-docx for core props (simple & stable).
+- Use zipfile + iterparse to stream-read XML parts (fast, low memory) for existing counts.
+- Use utils.text_extract.extract_docx_text to build a single text sample (early-stopped at max_text_chars from config).
 """
 
 from __future__ import annotations
-from zipfile import ZipFile, BadZipFile
+
 from pathlib import Path
 from typing import Any, Dict, Optional
-from zipfile import ZipFile
+from zipfile import ZipFile, BadZipFile
 from xml.etree.ElementTree import iterparse
 
 from docx import Document
@@ -28,6 +43,10 @@ from docx.opc.exceptions import PackageNotFoundError
 from core.interfaces import FileProcessor
 from core.models import FileArtifact
 from core.registry import register_processor
+
+# NEW: text extraction helpers and config
+from utils.text_extract import extract_docx_text, tokenize_words
+from infra.config_loader import load_config
 
 
 DOC_PARTS_TO_SCAN = (
@@ -56,6 +75,14 @@ class DocxProcessor(FileProcessor):
             "highlight_run_count": 0,
             "shading_highlight_count": 0,
             "read_error": False,
+            # NEW: text extraction fields
+            "text_sample": "",
+            "text_length": 0,
+            "token_count": 0,
+            # We keep separate flags for text extraction failures so other checks still run
+            "text_extraction_error": False,
+            # optional detail string set only when an error occurs
+            # "text_extraction_error_detail": "...",
         }
 
         # 1) Core props via python-docx (graceful if it fails)
@@ -69,8 +96,8 @@ class DocxProcessor(FileProcessor):
             metadata["core_modified"] = _safe_iso(getattr(core, "modified", None))
         except Exception:
             # We'll still try XML scanning even if python-docx stumbles.
-            metadata["paragraph_count"] = metadata.get("paragraph_count")
-            metadata["table_count"] = metadata.get("table_count")
+            # Keep already-initialized None values.
+            pass
 
         # 2) XML scan inside the .docx (ZIP)
         try:
@@ -132,6 +159,26 @@ class DocxProcessor(FileProcessor):
         except (PackageNotFoundError, KeyError, ValueError, OSError, Exception) as exc:
             metadata["read_error"] = True
             metadata["read_error_detail"] = str(exc) or exc.__class__.__name__
+
+        # 3) NEW: Plain-text sample extraction (for spelling/grammar checks)
+        # We compute this even if earlier steps had issues, so downstream checks that only need text can still run.
+        try:
+            cfg = load_config()
+            # Only extract text when at least one of these features is enabled.
+            if cfg.get("enable_spelling", True) or cfg.get("enable_grammar", False):
+                max_chars = int(cfg.get("max_text_chars", 5_000_000))
+                sample = extract_docx_text(path, max_chars)
+                metadata["text_sample"] = sample
+                metadata["text_length"] = len(sample)
+                # Tokenization gives a rough word count for quick stats; checks will re-tokenize as needed.
+                metadata["token_count"] = len(tokenize_words(sample))
+        except Exception as exc:
+            # Important: text extraction failure should not mark the entire file unreadable.
+            metadata["text_sample"] = ""
+            metadata["text_length"] = 0
+            metadata["token_count"] = 0
+            metadata["text_extraction_error"] = True
+            metadata["text_extraction_error_detail"] = str(exc) or exc.__class__.__name__
 
         return FileArtifact(
             path=path,

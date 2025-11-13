@@ -47,6 +47,7 @@ import checks.docx_checks         # noqa: F401
 import checks.pptx_checks         # noqa: F401
 import checks.pdf_checks          # noqa: F401
 import checks.xlsx_checks         # noqa: F401
+import checks.spelling_checks     # noqa: F401  # Minimal wiring: enable SpellingCheck via self-registration
 
 from checks.settings import set_modified_cutoff, clear_modified_cutoff
 from services.orchestrator import Orchestrator
@@ -61,7 +62,7 @@ def main():
     log = logging.getLogger("app")
 
     st.title("XRay Builder — Document Checker")
-    st.caption("Pre-Archival checks for .docx, .pptx, .pdf")
+    st.caption("Pre-Archival checks for .docx, .pptx, .pdf")  # Keep minimal; caption can be updated later
 
     root = folder_picker()
     cutoff_dt = cutoff_input()

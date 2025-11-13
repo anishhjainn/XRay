@@ -2,22 +2,48 @@
 """
 PDF technician (FileProcessor): builds a read-only FileArtifact for .pdf files.
 
-New metadata:
+Existing metadata produced (consumed by current checks):
+- encrypted: bool
+- pages: int | None
 - annots_summary: {Subtype -> count}  e.g. {"Text": 3, "Highlight": 5, "Ink": 1, ...}
 - mod_date: ISO 8601 string parsed from PDF /ModDate (fallback handled by checks)
+- read_error / read_error_detail on parse failures
 
-Requires: pypdf
+New (Phase 3: for spelling now, grammar later):
+- text_sample: str                    (normalized text extracted from pages, up to max_text_chars)
+- text_length: int
+- token_count: int
+- text_extraction_error: bool
+- text_extraction_error_detail: str | None
+
+Design (SOLID):
+- SRP: Processor extracts read-only facts (including a text sample); checks apply policy using those facts.
+- OCP: Adding checks (spelling/grammar) requires no orchestrator changes; they just read metadata.
+- LSP: Still honors FileProcessor; orchestrator treats it the same.
+- ISP: Checks depend only on FileArtifact, not on pypdf internals.
+- DIP: Checks depend on plain text (string) rather than concrete parsing libraries.
+
+Notes:
+- We do not mark the entire file unreadable if text extraction fails; we set text_extraction_error instead.
+- For encrypted PDFs, pypdf reports reader.is_encrypted == True. We record 'encrypted' and skip annotation/page parsing.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
+
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from core.interfaces import FileProcessor
 from core.models import FileArtifact
 from core.registry import register_processor
+
+# NEW: spelling/grammar helpers and config
+from utils.text_extract import extract_pdf_text, tokenize_words
+from infra.config_loader import load_config
 
 
 class PdfProcessor(FileProcessor):
@@ -34,8 +60,15 @@ class PdfProcessor(FileProcessor):
             "annots_summary": {},
             "mod_date": None,
             "read_error": False,
+            # NEW: text extraction for spelling/grammar checks
+            "text_sample": "",
+            "text_length": 0,
+            "token_count": 0,
+            "text_extraction_error": False,
+            # "text_extraction_error_detail": "...",
         }
 
+        # --- Core PDF parsing (annotations, pages, mod date) ---
         try:
             reader = PdfReader(str(path))
             encrypted = bool(getattr(reader, "is_encrypted", False))
@@ -67,7 +100,7 @@ class PdfProcessor(FileProcessor):
                                 name = name[1:]
                             annots[name] = annots.get(name, 0) + 1
                         except Exception:
-                            # Ignore a bad/indirect annotation; keep scanning
+                            # Ignore malformed annotations; continue
                             continue
                 metadata["annots_summary"] = annots
 
@@ -84,6 +117,23 @@ class PdfProcessor(FileProcessor):
         except (PdfReadError, OSError, ValueError, Exception) as exc:
             metadata["read_error"] = True
             metadata["read_error_detail"] = str(exc) or exc.__class__.__name__
+
+        # --- NEW: Plain-text sample extraction (for spelling/grammar) ---
+        # Keep this separate from core metadata parsing. If it fails, do not set read_error.
+        try:
+            cfg = load_config()
+            if cfg.get("enable_spelling", True) or cfg.get("enable_grammar", False):
+                max_chars = int(cfg.get("max_text_chars", 5_000_000))
+                sample = extract_pdf_text(path, max_chars)
+                metadata["text_sample"] = sample
+                metadata["text_length"] = len(sample)
+                metadata["token_count"] = len(tokenize_words(sample))
+        except Exception as exc:
+            metadata["text_sample"] = ""
+            metadata["text_length"] = 0
+            metadata["token_count"] = 0
+            metadata["text_extraction_error"] = True
+            metadata["text_extraction_error_detail"] = str(exc) or exc.__class__.__name__
 
         return FileArtifact(
             path=path,

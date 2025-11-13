@@ -2,8 +2,8 @@
 """
 XLSX technician (FileProcessor): builds a read-only FileArtifact for .xlsx files.
 
-This module extracts *facts* only (no policy/judgment). Checks will read the
-metadata we emit here and decide pass/fail. That keeps responsibilities clean.
+This module extracts facts (read-only metadata). Checks consume these facts and
+decide pass/fail. Keeping processors and checks separate follows SRP and DIP.
 
 Metadata provided (keys in artifact.metadata):
 
@@ -37,9 +37,27 @@ Protection & macros
 - password_encrypted_workbook: bool   (file-level encryption: not a plain OOXML ZIP)
 - has_vba_project: bool               (xl/vbaProject.bin present; unexpected for .xlsx)
 
+Yellow highlighting (cells and sheet tabs)
+- yellow_cell_count: int
+- yellow_tab_sheets: list[str]
+- yellow_tab_sheet_count: int
+
+Hidden rows/columns (reserved for future UI; not fully populated here)
+- hidden_row_count: int
+- hidden_col_count: int
+- hidden_rows_sample: list
+- hidden_cols_sample: list
+
 Diagnostics
 - read_error: bool
 - read_error_detail: str | None
+
+New (Phase 3: for spelling now, grammar later)
+- text_sample: str                    (normalized plain text, up to max_text_chars)
+- text_length: int
+- token_count: int
+- text_extraction_error: bool
+- text_extraction_error_detail: str | None
 """
 
 from __future__ import annotations
@@ -58,6 +76,10 @@ from core.interfaces import FileProcessor
 from core.models import FileArtifact
 from core.registry import register_processor
 
+# NEW: spelling/grammar text extraction helpers and config
+from utils.text_extract import extract_xlsx_text, tokenize_words
+from infra.config_loader import load_config
+
 
 # Tokens that commonly indicate Excel calculation errors. We count occurrences found
 # in formula text or value text where accessible (defensive; t="e" cells already counted).
@@ -71,22 +93,23 @@ _ERROR_TOKENS = {
     "#GETTING_DATA",
 }
 
-#helpers for Openpyxl
 
-def _norm_rgb(rgb: str | None) -> str: #this function normalizes the rgb value to last 6 hex chars
+def _norm_rgb(rgb: str | None) -> str:
+    """Normalize ARGB/RGB to last 6 hex chars; e.g. '00FFFF00' -> 'FFFF00'."""
     s = (rgb or "").upper()
     return s[-6:] if len(s) >= 6 else s
 
-"""
-This next function (_color_obj_is_classic_yellow) checks if the color object is classic yellow. 
-First it checks the rgb value of the color object.
-If the rgb value is not classic yellow, it checks the indexed value of the color object.
-If the indexed value is not classic yellow, it checks the theme value of the color object.
-if the theme value is not classic yellow, it returns false.
-"""
 
-def _color_obj_is_classic_yellow(color, theme_rgb_map: dict[int, str]) -> bool: 
-    if color is None: #if color is None then return false
+def _color_obj_is_classic_yellow(color, theme_rgb_map: dict[int, str]) -> bool:
+    """
+    Decide whether an openpyxl color object represents classic Excel yellow.
+
+    Classic yellow detection:
+    - Solid pattern with fg/bg rgb 'FFFF00'
+    - indexed == 6
+    - theme+tint resolves to 'FFFF00'
+    """
+    if color is None:
         return False
 
     rgb_value = getattr(color, "rgb", None)
@@ -107,6 +130,7 @@ def _color_obj_is_classic_yellow(color, theme_rgb_map: dict[int, str]) -> bool:
 
 
 def _is_classic_yellow_fill(fill, theme_rgb_map: dict[int, str]) -> bool:
+    """Return True if the cell fill is a 'solid' classic yellow (fg/bg)."""
     try:
         if getattr(fill, "patternType", None) != "solid":
             return False
@@ -120,15 +144,16 @@ def _is_classic_yellow_fill(fill, theme_rgb_map: dict[int, str]) -> bool:
     except Exception:
         return False
 
+
 class XlsxProcessor(FileProcessor):
     def supports(self):
-        # LSP: mirrors other processors (e.g., PdfProcessor/PptxProcessor/DocxProcessor)
+        # LSP: mirrors other processors
         return [".xlsx"]
 
     def build_artifact(self, path: Path) -> FileArtifact:
         size = path.stat().st_size
 
-        # Default metadata. We fill what we can; if anything fails, we mark read_error but still return an artifact.
+        # Default metadata. Populate defensively; keep the artifact useful even if some reads fail.
         metadata: Dict[str, Any] = {
             "kind": "xlsx",
             "core_author": None,
@@ -156,37 +181,41 @@ class XlsxProcessor(FileProcessor):
             "hidden_col_count": 0,
             "hidden_rows_sample": [],   # list of {"sheet": <name>, "row": <int>}
             "hidden_cols_sample": [],   # list of {"sheet": <name>, "col": <str>}
-
+            # NEW: text extraction for spelling/grammar checks
+            "text_sample": "",
+            "text_length": 0,
+            "token_count": 0,
+            "text_extraction_error": False,
+            # "text_extraction_error_detail": "...",
         }
+
         theme_rgb_map = theme_rgb_map_from_path(path)
 
-        # --- 1) Quick header sniff: distinguish OOXML ZIP vs. OLE/encrypted container ---
-        # Excel files that are password-encrypted are typically stored in an OLE Compound File
-        # (magic D0 CF 11 E0 ...), not a plain ZIP. Plain XLSX (OOXML) starts with PK 0x03 0x04.
+        # --- 1) Quick header sniff: distinguish OOXML ZIP vs OLE/encrypted container ---
+        # Password-encrypted Excel typically uses OLE CF, not a plain ZIP. Plain XLSX starts with PK 0x03 0x04.
         try:
             with path.open("rb") as fp:
                 magic = fp.read(8)
             if magic.startswith(b"\xD0\xCF\x11\xE0"):  # OLE Compound (encrypted or legacy)
                 metadata["password_encrypted_workbook"] = True
-                # We cannot open this in read-only mode to extract parts. Report a read error and return.
                 metadata["read_error"] = True
                 metadata["read_error_detail"] = "Encrypted or non-OOXML container (OLE compound)"
+                # Early return: we can't parse styles/parts from an encrypted OLE container
                 return FileArtifact(
                     path=path,
                     extension=".xlsx",
                     size_bytes=size,
                     metadata=metadata,
                 )
-            # If not OLE, we expect a ZIP (PK\x03\x04). If it's something else, we'll try ZIP/openpyxl and catch errors.
         except Exception as exc:
-            # If we can't even read the header, mark a read error but continue; maybe openpyxl or zipfile still helps.
+            # We can still try openpyxl/zip later; record a hint
             metadata["read_error"] = True
             metadata["read_error_detail"] = f"Header read failed: {exc.__class__.__name__}"
 
-        # --- 2) Use openpyxl for core props & sheet visibility (cheap, robust) ---
-        # We avoid iterating cells via openpyxl (slow for huge sheets); XML streaming later handles heavy scanning.
+        # --- 2) Use openpyxl for core props, sheet visibility, yellow detection ---
         try:
-            # Need styles for yellow detection; optimized read_only cells omit fill info.
+            # Use data_only=True to resolve cached values where possible.
+            # Note: We are NOT in read_only mode here because we need styles for fill/tab color inspection.
             wb = load_workbook(filename=str(path), data_only=True)
 
             # Core document properties (author/created/modified)
@@ -202,7 +231,6 @@ class XlsxProcessor(FileProcessor):
 
             hidden = 0
             very_hidden = 0
-            # openpyxl exposes sheet state via wb[sheet].sheet_state (values like 'visible', 'hidden', 'veryHidden')
             for name in sheetnames:
                 try:
                     ws = wb[name]
@@ -212,12 +240,12 @@ class XlsxProcessor(FileProcessor):
                     elif state == "veryHidden":
                         very_hidden += 1
                 except Exception:
-                    # If a single sheet can't be accessed, ignore and continue scanning others.
+                    # Skip problematic sheets but keep scanning
                     continue
             metadata["hidden_sheet_count"] = hidden
             metadata["very_hidden_sheet_count"] = very_hidden
 
-                        # ---- Yellow sheet tabs (classic yellow) ----
+            # ---- Yellow sheet tabs (classic yellow) ----
             yellow_tabs = []
             for name in sheetnames:
                 try:
@@ -240,22 +268,18 @@ class XlsxProcessor(FileProcessor):
                             if fill and _is_classic_yellow_fill(fill, theme_rgb_map):
                                 yellow_cells += 1
             except Exception as exc:
-                # Continue with a partial count but record the issue
+                # Continue with partial counts; record a warning detail
                 metadata["read_error"] = True
                 prev = metadata.get("read_error_detail")
                 msg = f"yellow-cells-scan: {exc.__class__.__name__}"
                 metadata["read_error_detail"] = msg if not prev else f"{prev}; {msg}"
-
             metadata["yellow_cell_count"] = yellow_cells
 
-
         except Exception as exc:
-            # Not fatal: XML streaming (below) can still give us most counts
+            # Not fatal: XML streaming (below) can still produce most counts
             metadata.setdefault("sheet_count", None)
-            # Record the error context for transparency; checks will show this as WARNING if needed.
             metadata["read_error"] = True
             detail = str(exc) or exc.__class__.__name__
-            # concatenate with any prior detail (e.g., header sniff note)
             prev = metadata.get("read_error_detail")
             metadata["read_error_detail"] = detail if not prev else f"{prev}; openpyxl: {detail}"
 
@@ -268,39 +292,35 @@ class XlsxProcessor(FileProcessor):
                 if "xl/vbaProject.bin" in names:
                     metadata["has_vba_project"] = True
 
-                # Workbook protection & external rels via workbook parts
-                # - workbookProtection element in xl/workbook.xml (attributes like lockStructure/lockWindows)
+                # Workbook protection via <workbookProtection>
                 if "xl/workbook.xml" in names:
                     metadata["workbook_structure_protected"] = _workbook_structure_is_protected(zf, "xl/workbook.xml")
 
-                # External links: relationships in xl/_rels/workbook.xml.rels
+                # External links via workbook relationships
                 if "xl/_rels/workbook.xml.rels" in names:
                     ext_count = _count_external_relationships(zf, "xl/_rels/workbook.xml.rels")
                     metadata["external_links_count"] += ext_count
 
-                # Some external workbook references may also be represented under xl/externalLinks/*
+                # externalLinks parts also indicate external references
                 for n in names:
                     if n.startswith("xl/externalLinks/") and n.endswith(".xml"):
-                        # Presence indicates at least one external workbook link
                         metadata["external_links_count"] += 1
 
                 # Data connections
                 if "xl/connections.xml" in names:
                     metadata["data_connections_count"] = _count_tag_local(zf, "xl/connections.xml", "connection")
 
-                # Comments (legacy notes): xl/comments*.xml with <comment>
+                # Comments (legacy)
                 for n in names:
-                    # comments1.xml, comments2.xml, ...
                     if n.startswith("xl/comments") and n.endswith(".xml"):
                         metadata["comments_count"] += _count_tag_local(zf, n, "comment")
 
-                # Threaded comments (modern): xl/threadedComments/threadedComment*.xml with <threadedComment>
+                # Threaded comments (modern)
                 for n in names:
                     if n.startswith("xl/threadedComments/") and n.endswith(".xml"):
                         metadata["threaded_comments_count"] += _count_tag_local(zf, n, "threadedComment")
 
-                # Worksheet scans: count <f> (formulas) and error cells <c t="e">,
-                # also scan formula text for '#REF!' and other error tokens.
+                # Worksheet scans for formulas and error cells/tokens
                 for n in names:
                     if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"):
                         f_count, e_count, ref_err, other_errs = _scan_worksheet_for_formulas_and_errors(zf, n)
@@ -314,6 +334,29 @@ class XlsxProcessor(FileProcessor):
             detail = str(exc) or exc.__class__.__name__
             prev = metadata.get("read_error_detail")
             metadata["read_error_detail"] = detail if not prev else f"{prev}; zip-scan: {detail}"
+
+        # --- 4) NEW: Plain-text sample extraction for spelling/grammar checks ---
+        # We keep this separate from the structural scans above and do not flip read_error on extraction failure.
+        try:
+            cfg = load_config()
+            if cfg.get("enable_spelling", True) or cfg.get("enable_grammar", False):
+                max_chars = int(cfg.get("max_text_chars", 5_000_000))
+                # Your policy: include text from hidden sheets; skip formula texts entirely.
+                sample = extract_xlsx_text(
+                    path,
+                    max_chars=max_chars,
+                    include_hidden=True,
+                    skip_formulas=True,
+                )
+                metadata["text_sample"] = sample
+                metadata["text_length"] = len(sample)
+                metadata["token_count"] = len(tokenize_words(sample))
+        except Exception as exc:
+            metadata["text_sample"] = ""
+            metadata["text_length"] = 0
+            metadata["token_count"] = 0
+            metadata["text_extraction_error"] = True
+            metadata["text_extraction_error_detail"] = str(exc) or exc.__class__.__name__
 
         # Return the immutable artifact the rest of the system expects
         return FileArtifact(
@@ -367,21 +410,16 @@ def _workbook_structure_is_protected(zf: ZipFile, member: str) -> bool:
     with zf.open(member) as fp:
         for _event, elem in iterparse(fp, events=("end",)):
             if _local_name(elem.tag) == "workbookProtection":
-                # If present at all, Excel UI would show a protection is set (may lock structure/windows).
-                # Attributes like lockStructure="1" or lockWindows="1" commonly appear.
                 if elem.attrib:
                     protected = True
                 elem.clear()
-                # We can break here (first hit is enough), but we let the loop finish for cleanliness.
             else:
                 elem.clear()
     return protected
 
 
 def _looks_external_target(target: str) -> bool:
-    """
-    Heuristic to decide if a relationship target is external (URL or UNC path).
-    """
+    """Heuristic to decide if a relationship target is external (URL or UNC path)."""
     t = (target or "").strip().lower()
     return (
         t.startswith("http://")
@@ -425,42 +463,32 @@ def _scan_worksheet_for_formulas_and_errors(zf: ZipFile, member: str) -> tuple[i
     ref_err = 0
     other_errs = 0
 
-    # For performance, we only keep minimal state and clear elements promptly.
     with zf.open(member) as fp:
-        formula_text = None  # hold text of current <f> if any (we only need to check tokens)
-        for event, elem in iterparse(fp, events=("end",)):
+        for _event, elem in iterparse(fp, events=("end",)):
             lname = _local_name(elem.tag)
 
             if lname == "f":
-                # Formula element; text may be None or a small string.
                 formula_count += 1
                 text = (elem.text or "").strip()
                 if "#REF!" in text:
                     ref_err += 1
-                # Scan for other error tokens in formula text as a defensive heuristic.
                 if any(tok in text for tok in _ERROR_TOKENS):
                     other_errs += 1
                 elem.clear()
 
             elif lname == "c":
-                # Cell element; check type attribute for error cells (t="e")
                 cell_type = (elem.attrib.get("t") or "").strip().lower()
                 if cell_type == "e":
                     error_cells += 1
-                    # Also peek at <v> inside this <c> (value may hold an error token string)
-                    # NOTE: With iterparse(events=("end",)), the <v> would already have fired earlier.
-                    # To stay cheap, we don't rewind; the t="e" count already captures error cells.
                 elem.clear()
 
             elif lname == "v":
-                # Cell value. Some files might carry error tokens in <v> (rare).
                 text = (elem.text or "").strip()
                 if any(tok == text for tok in _ERROR_TOKENS):
                     other_errs += 1
                 elem.clear()
 
             else:
-                # Any other tag we don't track
                 elem.clear()
 
     return formula_count, error_cells, ref_err, other_errs
