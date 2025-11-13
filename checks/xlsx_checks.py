@@ -362,8 +362,6 @@ register_check(XlsxWorkbookProtectionCheck())
 register_check(XlsxCommentsCheck())
 register_check(XlsxVbaInXlsxCheck())
 
-#Implementing Yellow cells check
-
 # -------------------------------------------------------------------
 # 8) Yellow-highlighted Cells (fail if any yellow cell found)
 # 9) Yellow-highlighted Sheet Tabs (fail if any sheet tab is yellow)
@@ -388,13 +386,14 @@ class XlsxYellowCellsCheck(Check):
         meta = artifact.metadata or {}
 
         if meta.get("read_error"):
-            return _unreadable_result(self.name(), self.description(), meta)
+            # FIX: pass artifact + explicit message
+            return _unreadable_result(artifact, self.name(), "Unreadable XLSX (parse error)", meta)
 
         yellow_cells = int(meta.get("yellow_cell_count") or 0)
         passed = yellow_cells == 0
 
         return CheckResult(
-            file = artifact.path,
+            file=artifact.path,
             check_name=self.name(),
             passed=passed,
             severity=Severity.INFO if passed else Severity.ERROR,
@@ -424,14 +423,15 @@ class XlsxYellowSheetTabsCheck(Check):
         meta = artifact.metadata or {}
 
         if meta.get("read_error"):
-            return _unreadable_result(self.name(), self.description(), meta)
+            # FIX: pass artifact + explicit message
+            return _unreadable_result(artifact, self.name(), "Unreadable XLSX (parse error)", meta)
 
         count = int(meta.get("yellow_tab_sheet_count") or 0)
         sheets = meta.get("yellow_tab_sheets") or []
         passed = count == 0
 
         return CheckResult(
-            file = artifact.path,
+            file=artifact.path,
             check_name=self.name(),
             passed=passed,
             severity=Severity.INFO if passed else Severity.ERROR,
