@@ -94,7 +94,7 @@ def main():
 
         # Run scan
         orchestrator = Orchestrator(on_progress=on_progress)
-        report = orchestrator.run_scan_v2(root_path, config_snapshot=cfg)
+        report = orchestrator.run_scan_v2(root_path, config_snapshot=cfg)       
 
         # Show results
         st.divider()

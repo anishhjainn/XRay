@@ -152,6 +152,11 @@ class XlsxProcessor(FileProcessor):
             "yellow_cell_count": 0,
             "yellow_tab_sheets": [],
             "yellow_tab_sheet_count": 0,
+            "hidden_row_count": 0,
+            "hidden_col_count": 0,
+            "hidden_rows_sample": [],   # list of {"sheet": <name>, "row": <int>}
+            "hidden_cols_sample": [],   # list of {"sheet": <name>, "col": <str>}
+
         }
         theme_rgb_map = theme_rgb_map_from_path(path)
 
