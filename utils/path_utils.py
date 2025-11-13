@@ -18,10 +18,19 @@ import os
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Set
 
-# Defaults are small and explicit; callers can override if needed.
-_DEFAULT_EXTS: Set[str] = {".docx", ".pptx", ".pdf"}
-_DEFAULT_IGNORES: Set[str] = {".git", "__pycache__", "venv"}
+# Pull default extensions from central config
+try:
+    from utils.config import ALLOWED_EXTENSIONS as _CONFIG_EXTS  #from config file, import the allowed extensions as configured extensions
+except Exception:
+    # Safe fallback if config import fails during tooling/tests
+    _CONFIG_EXTS = [".docx", ".pptx", ".pdf"]
 
+# Defaults are small and explicit; callers can override if needed.
+# Normalize config-provided extensions to a lowercase, dot-prefixed set
+_DEFAULT_EXTS: Set[str] = {
+    (e if str(e).startswith(".") else "." + str(e)).lower() for e in _CONFIG_EXTS
+}
+_DEFAULT_IGNORES: Set[str] = {".git", "__pycache__", "venv", "ignore"} #ignores files which are named with these words
 
 def iter_target_files(
     root: Path | str,

@@ -50,7 +50,7 @@ class ModifiedBeforeCutoffCheck(Check):
 
     def applies_to(self):
         # Applies to all supported file types in this app.
-        return [".docx", ".pptx", ".pdf"]
+        return ["*"]
 
     def run(self, artifact: FileArtifact) -> CheckResult:
         cutoff_utc = get_modified_cutoff()

@@ -5,9 +5,6 @@ Tiny configuration loader.
 Design:
 - Single Responsibility: provide app-wide config values.
 - Keeps sane defaults; allows simple environment overrides for quick tweaks.
-
-Extend later:
-- Load from TOML/YAML if you want per-project settings.
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ from typing import Any, Dict, List
 
 _DEFAULT: Dict[str, Any] = {
     "max_filename_length": 120,
-    "target_extensions": [".docx", ".pptx", ".pdf"],
+    "target_extensions": [".docx", ".pptx", ".pdf",".xlsx"],
     "ignore_dirs": [".git", "__pycache__", "venv"],
     "log_level": "INFO",  # DEBUG/INFO/WARNING/ERROR
 }
