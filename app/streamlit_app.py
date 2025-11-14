@@ -33,6 +33,9 @@ import streamlit as st
 from infra.config_loader import load_config
 from infra.logging_config import configure_logging
 from ui.components import folder_picker, cutoff_input, run_controls, summary_panel, results_table, downloads, progress_widgets, yellow_cells_drilldown
+from app.components import sidebar_extension_selector, sidebar_discovery_summary
+from utils.path_utils import iter_target_files
+from services.orchestrator import Orchestrator
 
 
 # Import processors/checks so they self-register with the registry on import.
@@ -67,13 +70,40 @@ def main():
     root = folder_picker()
     cutoff_dt = cutoff_input()
 
+    # Initialize session state for two-stage scan
+    if "extensions_populated" not in st.session_state:
+        st.session_state.extensions_populated = False
+    if "current_root" not in st.session_state:
+        st.session_state.current_root = None
+    
+    # Reset extension population state if folder changes
+    if root and st.session_state.current_root != root:
+        st.session_state.extensions_populated = False
+        st.session_state.current_root = root
+
     colA, colB = st.columns([1, 3])
-    run_clicked = colA.button("Scan folder", type="primary", use_container_width=True)
+    
+    # Change button label based on state
+    button_label = "Select file types" if not st.session_state.extensions_populated else "Scan folder"
+    run_clicked = colA.button(button_label, type="primary", use_container_width=True)
     reset_clicked = colB.button("Reset cutoff", use_container_width=True, help="Clears the configured cutoff date")
 
     if reset_clicked:
         clear_modified_cutoff()
         st.success("Cutoff cleared for this session.")
+
+    # Show extension selector in sidebar after first click
+    enabled_exts = []
+    if root and st.session_state.extensions_populated:
+        root_path = Path(root)
+        enabled_exts = sidebar_extension_selector(root_path)
+        
+        # Show discovery count for current selection
+        ext_filter = enabled_exts if enabled_exts else None
+        discovery_count = 0
+        for _ in iter_target_files(root_path, exts=ext_filter):
+            discovery_count += 1
+        sidebar_discovery_summary(discovery_count)
 
     if run_clicked:
         if not root:
@@ -85,17 +115,25 @@ def main():
             st.error("Folder does not exist or is not a directory.")
             return
 
+        # First click: populate extensions in sidebar
+        if not st.session_state.extensions_populated:
+            st.session_state.extensions_populated = True
+            st.rerun()  # Rerun to show the extension selector
+            return
+
+        # Second click: perform actual scan
         # Apply cutoff setting for this run
         set_modified_cutoff(cutoff_dt)
 
-        # Progress widgets + discovery count
+        # Progress widgets
         set_total, on_progress = progress_widgets()
-        discovered = list(iter_target_files(root_path, exts=cfg.get("target_extensions"), ignore_dirs=cfg.get("ignore_dirs")))
-        set_total(len(discovered))
+
+        # Use already computed enabled_exts from above
+        ext_filter = enabled_exts if enabled_exts else None
 
         # Run scan
         orchestrator = Orchestrator(on_progress=on_progress)
-        report = orchestrator.run_scan_v2(root_path, config_snapshot=cfg)       
+        report = orchestrator.run_scan_v2(root_path, config_snapshot=cfg, exts=ext_filter)
 
         # Show results
         st.divider()
