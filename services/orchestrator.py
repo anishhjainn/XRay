@@ -49,16 +49,25 @@ class Orchestrator:
     def __init__(self, on_progress: Optional[ProgressFn] = None) -> None:
         self._on_progress = on_progress
 
-    def run_scan(self, folder: str | Path) -> AggregateReport:
+    def run_scan(self, folder: str | Path, exts: Optional[List[str]] = None) -> AggregateReport:
         
         """
         Walk the folder, route files to processors, run checks, and return an AggregateReport.
+
+        Parameters
+        ----------
+        folder : str | Path
+            Root folder to scan.
+        exts : list[str] | None, optional
+            Extension filter (dot-prefixed, case-insensitive). When provided, only files
+            with these extensions are discovered and scanned. If None or empty, all
+            supported files are considered.
 
         - Converts unexpected processor/check exceptions into ERROR CheckResult entries.
         - Skips files with no matching processor (shouldn't happen if discovery filters are set).
         """
         root = Path(folder)
-        file_list = list(iter_target_files(root))
+        file_list = list(iter_target_files(root, exts=exts))
         total = len(file_list)
 
         proc_index = self._index_processors()
@@ -98,15 +107,26 @@ class Orchestrator:
 
         return report
 
-    def run_scan_v2(self, folder: str | Path, config_snapshot: Dict = None) -> ScanReport:
+    def run_scan_v2(self, folder: str | Path, config_snapshot: Dict = None, exts: Optional[List[str]] = None) -> ScanReport:
         """
         File-centric scan that returns a ScanReport (header + files with verdicts).
+
+        Parameters
+        ----------
+        folder : str | Path
+            Root folder to scan.
+        config_snapshot : dict | None
+            Runtime configuration snapshot.
+        exts : list[str] | None, optional
+            Extension filter (dot-prefixed, case-insensitive). When provided, only files
+            with these extensions are discovered and scanned. If None or empty, all
+            supported files are considered.
         """
         start = datetime.now(timezone.utc)
         config_snapshot = dict(config_snapshot or {})
 
         # Reuse your v1 logic to get flat results
-        flat = self.run_scan(folder)  # AggregateReport
+        flat = self.run_scan(folder, exts=exts)  # AggregateReport
 
         # Group by file
         by_file: Dict[Path, List[CheckResult]] = defaultdict(list)
